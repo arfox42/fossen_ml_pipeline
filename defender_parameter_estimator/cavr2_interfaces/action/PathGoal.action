@@ -1,0 +1,61 @@
+# define the goal type
+uint8 P2P2P = 0 # point to point to point
+uint8 P2P2O = 1 # point to point to orbit
+uint8 P2O2P = 2 # point to orbit to point
+uint8 P2O2O = 3 # point to orbit to orbit
+uint8 END_OF_MISSION = 4
+uint8 P2P2L = 5 # not to be sent to the planner
+uint8 P2O2L = 6 # not to be sent to the planner
+uint8 UNDEFINED = 255
+
+# define possible results
+uint8 RESULT_PATH_BLOCKED = 1
+uint8 RESULT_PLANNING_FAILED = 2
+uint8 RESULT_ABORTED = 3
+uint8 RESULT_SUCCEEDED = 4
+uint8 RESULT_FAILED = 5
+
+# define execution flags
+uint8 EXEC_NONE = 0
+uint8 EXEC_VELCMD = 1
+uint8 EXEC_ALTCMD = 2
+uint8 EXEC_DEPTHCMD = 4
+uint8 EXEC_PATH_FORWARD = 8
+uint8 EXEC_PATH_LEFT = 16
+uint8 EXEC_PATH_RIGHT = 32
+uint8 EXEC_PATH_REVERSE = 64
+
+uint16 id
+uint8 type
+string frame_id_init
+geometry_msgs/Pose pose_init
+string name_init
+float32 vel_init # Initial velocity in the 1st segment
+string pose_init_name
+string frame_id_1
+geometry_msgs/Pose pose_1
+float32 vel_c_1 # commanded velocity inside 1st segment
+float32 vel_f_1 # velocity at the end of the 1st segment
+float32 rad_1 # only used for orbit
+uint8 flag_1
+float32 heave_cmd_1
+string name_1
+string frame_id_2
+geometry_msgs/Pose pose_2
+float32 vel_c_2 # commanded velocity inside 2nd segment
+float32 vel_f_2 # velocity at the end of the 2nd segment
+float32 rad_2
+uint8 flag_2
+float32 heave_cmd_2
+string name_2
+# kinematic constraints
+float32 vel_max
+float32 acc_max
+float32 dec_max
+---
+# Result
+uint8 result
+---
+# Feedback -
+string progress
+float64 percent_complete

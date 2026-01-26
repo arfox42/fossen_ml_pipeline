@@ -1,0 +1,21 @@
+std_msgs/Header header
+string type
+int8 source_addr
+int8 destination_addr
+bool ack
+int8 rate
+int16 num_of_bytes
+int16 num_of_frames
+int8[] data
+string parameter
+bool overwrite
+string modem_message
+float32 travel_time
+float32 range_meters 
+int32 mfd_peak
+int32 power
+int32 ratio
+int32 spl
+int32 quality_factor
+int32 packet_type
+

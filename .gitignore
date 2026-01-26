@@ -1,0 +1,45 @@
+# =========================
+# Python / venv
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# ML artifacts (do NOT version)
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.onnx
+hmc_outputs/
+wandb/
+runs/
+tensorboard/
+lightning_logs/
+logs/
+
+# =========================
+# Raw ROS bag data (do NOT version)
+# =========================
+*.mcap
+*.db3
+*.bag
+*.bag.active
+rov_bag_*/
+
+# =========================
+# Editors / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+

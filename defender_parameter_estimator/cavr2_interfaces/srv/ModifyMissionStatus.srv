@@ -1,0 +1,4 @@
+cavr2_interfaces/MissionControl mission_control_msg
+---
+bool success
+

@@ -1,0 +1,57 @@
+# Goal
+uint8 WAYPOINT = 0
+uint8 ORBIT = 1
+uint8 STATION_KEEP = 2
+uint8 END_OF_MISSION = 3
+uint8 TELE_OP = 4
+uint8 DYNAMIC_POSITION = 5
+uint8 HOVER = 6
+uint8 HOVER_AND_TRANSLATE = 7
+uint8 HOME = 8
+uint8 LOITER_STATION_KEEP = 9
+uint8 LOITER_ORBIT = 10
+uint8 OVERRIDE_GOAL = 11
+uint8 UNDEFINED = 255
+
+uint8 EXEC_NONE = 0
+uint8 EXEC_VELCMD = 1
+uint8 EXEC_ALTCMD = 2
+uint8 EXEC_DEPTHCMD = 4
+uint8 EXEC_PATH_FORWARD = 8
+uint8 EXEC_PATH_LEFT = 16
+uint8 EXEC_PATH_RIGHT = 32
+uint8 EXEC_PATH_REVERSE = 64
+
+
+string name_1
+string frame_id_1
+geometry_msgs/Pose pose_1
+uint8 type_1
+uint8 flag_1
+float32 rad_1
+float32 dur_1
+float32 heave_cmd_1
+float32 vel_cmd_1 # % of max
+
+string name_2
+string frame_id_2
+geometry_msgs/Pose pose_2
+uint8 type_2
+uint8 flag_2
+float32 rad_2
+float32 dur_2
+float32 heave_cmd_2
+float32 vel_cmd_2 # % of max
+---
+
+# Result
+bool success          # Indicates if navigation was successful
+string message        # Additional information about the result
+
+---
+# Feedback
+float32 distance_to_goal
+float32 time_at_goal
+# watch radius or orbit radius (depending on the type of goal)
+float32 rad
+

@@ -1,0 +1,27 @@
+std_msgs/Header header
+bool full_override_enabled
+bool full_override_active
+bool depth_override_enabled
+int32 year
+int32 month
+int32 day
+int32 hours
+int32 minutes
+float64 seconds
+float64 lat
+float64 lon
+float64 depth
+float64 depth_goal
+float64 altitude
+float64 pitch
+float64 roll
+int32 thruster_rpm
+int32 thruster_rpm_goal
+float64 velocity
+float64 heading
+float64 heading_rate
+float64 heading_goal
+uint64 mode
+int16 leg_number
+string state
+

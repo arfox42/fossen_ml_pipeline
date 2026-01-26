@@ -1,0 +1,11 @@
+# Goal definition
+nav_msgs/Path path
+---
+# Result definition
+bool success
+---
+# Feedback definition
+string progress
+uint32 current_waypoint
+float32 distance_to_goal
+float32 percent_complete

@@ -1,0 +1,21 @@
+std_msgs/Header header
+string mode
+string type
+string depth_ctrl
+float64 heading
+string nav_units
+float64 lat
+float64 lon
+int32 north
+int32 east
+float64 depth
+float64 altitude
+float64 speed_ms
+float64 heading_rate
+int32 main_thruster
+int32 fwd_horz
+int32 fwd_vert
+int32 aft_horz
+int32 aft_vert
+string ack
+
