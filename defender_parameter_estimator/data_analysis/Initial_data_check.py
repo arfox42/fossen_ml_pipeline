@@ -8,6 +8,7 @@ csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_fil
 
 data = np.genfromtxt(csv_path, delimiter="\t", skip_header=1)
 
+
 # Column mapping:
 # time, u_dot, v_dot, w_dot, p_dot, q_dot, r_dot,
 # u, v, w, p, q, r,
@@ -19,6 +20,7 @@ time   = data[:, 0]
 
 # Linear accelerations (IMU)
 u_dot  = data[:, 1]
+
 v_dot  = data[:, 2]
 w_dot  = data[:, 3]
 

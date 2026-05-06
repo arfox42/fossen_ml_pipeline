@@ -30,7 +30,7 @@ INCLUDE_CA = False   # True -> use C_RB + C_A, False -> use C_RB only
 INCLUDE_G  = True   # optional: restoring (set True later if needed)
 FORCE_FIXED_DT = False
 DT_FIXED = 0.1
-ACTIVE_DOF = "N"   # options: "X","Y","Z","K","M","N","ALL"
+ACTIVE_DOF = "X"   # options: "X","Y","Z","K","M","N","ALL"
 
 DOF_INDEX = {
     "X": 0,  # u
@@ -44,7 +44,7 @@ DOF_INDEX = {
 # ============================================================
 # === 1) Load CSV ============================================
 # ============================================================
-csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/Coupled Maneuvers/csv_full_simulation_truth_teleop_circle.csv"
+csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/X_Data/Sim_data/csv_full_truth_x_run_26OCT.csv"
 
 data = np.genfromtxt(csv_path, delimiter="\t", skip_header=1)
 
@@ -138,7 +138,7 @@ params_mle = {
     "B": 168.56,          # buoyancy [N]
     "I_xx": 1.0,
     "I_yy": 1.0,
-    "I_zz": 0.6333212852478027,
+    "I_zz": 1.0,
 
     # CG / CB (m)
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
@@ -161,9 +161,9 @@ params_mle = {
     "N_r":  -10.377045631408691,   "N_rr": -8.736456871032715,
 
     # Surge terms (MLE-learned)
-    "X_dot_u": -17.438413619995117,
+    "X_dot_u": -4.66,
     "X_u":     -4.717586517333984,
-    "X_uu":    -51.40349197387695,
+    "X_uu":    -51.50349197387695,
 }
 
 
@@ -178,7 +178,7 @@ params_map = {
     "B": 168.56,          # buoyancy [N]
     "I_xx": 1.0,
     "I_yy": 1.0,
-    "I_zz": 0.987586,
+    "I_zz": 1.0,
 
     # CG / CB (m)
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
@@ -192,16 +192,16 @@ params_map = {
     "N_dot_r": -0.273586,
 
     # Linear & quadratic damping (non-surge from ROS node)
-    "Y_v":  -12.6,     "Y_vv": -102.006,
+    "Y_v":  -8.25,     "Y_vv": -102.006,
     "Z_w":  -14.17,    "Z_ww": -155.8358,
     "K_p":  -1.5,      "K_pp": -2.1,
     "M_q":  -2.9,      "M_qq": -14.6,
-    "N_r":  -10.363531,   "N_rr": -8.756483,
+    "N_r":  -10.343,   "N_rr": -8.8,
 
     # Surge terms (MAP-learned)
-    "X_dot_u": -17.438413619995117,
-    "X_u":     -4.717586517333984,
-    "X_uu":    -51.40349197387695,
+    "X_dot_u": -18.0,
+    "X_u":     -4.66,
+    "X_uu":    -51.5,
 }
 
 # -----------------------------

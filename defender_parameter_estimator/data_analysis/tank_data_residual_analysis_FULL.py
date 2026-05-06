@@ -3,12 +3,11 @@
 post_check_full6dof_single_dof.py
 -------------------------------------
 Forward-integrates full 6DOF, but plots ONLY the selected ACTIVE_DOF channel
-(velocity + residual), plus an optional no-integration accel consistency check.
-
-Now includes an optional overlay for:
-    - MLE (HYBRID: AHRS+MOCAP CSV)                 -> params_mle
-    - MLE (MOCAP-ONLY CSV)                        -> params_mle_mocap
-    - MLE (MOCAP-ONLY CSV, incl. dropout periods) -> params_mle_mocap_dropout   [NEW]
+(velocity + residual), plus:
+    - optional segmented integration (NaN/dropout aware)
+    - optional no-integration accel consistency check
+    - optional inverse dynamics tau residual diagnostics
+    - optional HMC posterior predictive band (segmented + filtered)
 
 Core model:
     M nu_dot + C(nu)nu + D(nu)nu + g(eta) = tau
@@ -26,19 +25,35 @@ import torch  # only needed if you later enable HMC band loading
 # ------------------------------------------------------------
 # 0a) Paths (you set these manually)
 # ------------------------------------------------------------
-csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/X_Data/Tank_data/defender_data_mocap_dropout.csv"
-HMC_SAMPLES_PATH = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/hmc_outputs/hmc_synthetic_heave_samples.pt"
+csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/Coupled Maneuvers/defender_data_teleop_circle.csv"
+HMC_SAMPLES_PATH = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/hmc_outputs/hmc_yaw_samples_2.pt"
+
+# --- NaN / dropout handling ---
+SEGMENTED_INTEGRATION = False          # integrate only over valid segments; NaNs stay as gaps
+USE_VALIDITY_FLAGS = True             # gate using pose/twist/wrench valid fields if present
+REQUIRE_POSE_VALID = False
+REQUIRE_TWIST_VALID = True
+REQUIRE_WRENCH_VALID = True
+
+MAX_ALLOWED_AGE_S = None              # e.g. 0.05, or None
+MIN_SEG_LEN = 50                      # samples
 
 # ------------------------------------------------------------
 # 0b) Dataset / DOF
 # ------------------------------------------------------------
-ACTIVE_DOF = "X"   # "X","Y","Z","K","M","N"
+ACTIVE_DOF = "N"   # "X","Y","Z","K","M","N"
 
 # ------------------------------------------------------------
 # 0c) Physics toggles
 # ------------------------------------------------------------
 INCLUDE_CA = True   # True -> use C_RB + C_A, False -> use C_RB only
-INCLUDE_G  = True    # include restoring g(eta)
+INCLUDE_G  = True   # include restoring g(eta)
+
+# ------------------------------------------------------------
+# 0j) Optional thrust scaling (LUT gain test)
+# ------------------------------------------------------------
+USE_TAU_SCALE = False
+TAU_SCALE = 1.1   # try 0.9, 1.1, etc.
 
 # ------------------------------------------------------------
 # 0d) Integrator timing
@@ -49,27 +64,24 @@ DT_FIXED = 0.01
 # ------------------------------------------------------------
 # 0e) Velocity forward-integration overlays (main 3-panel plot)
 # ------------------------------------------------------------
-PLOT_SIM_MLE   = False   # forward-integrate with params_sim_mle (velocity overlay)
-PLOT_SIM_TRUTH = False   # forward-integrate with params_sim_truth (velocity overlay)
-PLOT_MLE       = True  # forward-integrate with params_mle (tank/hybrid MLE overlay)
+PLOT_SIM_MLE   = False
+PLOT_SIM_TRUTH = False
+PLOT_MLE       = True
 
-PLOT_TEST_PARAMS_1 = False  # forward-integrate with params_test_1
-PLOT_TEST_PARAMS_2 = False  # forward-integrate with params_test_2
+PLOT_TEST_PARAMS_1 = False
+PLOT_TEST_PARAMS_2 = False
 
-PLOT_MAP = True            # forward-integrate with params_map
-PLOT_HMC_TEST_PARAMS_1 = False  # optional point estimate overlay (params_hmc_test_1)
+PLOT_MAP = True
+PLOT_HMC_TEST_PARAMS_1 = False
 
 # ------------------------------------------------------------
 # 0f) HMC posterior predictive band (6DOF forward integration)
 # ------------------------------------------------------------
-ENABLE_HMC_BAND = False
+ENABLE_HMC_BAND = True
 HMC_BAND_NPLOT  = 200
 
-# Which physics model to start from when plotting the HMC band
-HMC_BASELINE = "MAP"   # "MAP" | "SIM_TRUTH" | "SIM_MLE"
+HMC_BASELINE = "SIM_MLE"   # "MAP" | "SIM_TRUTH" | "SIM_MLE"
 
-# Only allow the ACTIVE_DOF parameters to vary for band plotting
-# (prevents noisy/unidentifiable DOFs from destabilizing 6DOF integration)
 HMC_BAND_PARAMS_BY_DOF = {
     "X": ["X_dot_u", "X_u", "X_uu"],
     "Y": ["Y_dot_v", "Y_v", "Y_vv"],
@@ -78,24 +90,19 @@ HMC_BAND_PARAMS_BY_DOF = {
     "M": ["M_dot_q", "M_q", "M_qq"],
     "N": ["N_dot_r", "N_r", "N_rr"],
 }
-
-# Optional: ONLY uncomment if you truly estimated these in the HMC run
 HMC_BAND_GLOBAL_EXTRAS = [
-    # "m", "B",
+     "B"
     # "x_cg", "y_cg", "z_cg",
     # "x_cb", "y_cb", "z_cb",
 ]
-
 HMC_BAND_PARAM_SUBSET = HMC_BAND_PARAMS_BY_DOF[ACTIVE_DOF] + HMC_BAND_GLOBAL_EXTRAS
 
 # ------------------------------------------------------------
 # 0g) Optional accel consistency check (no integration)
 # CSV ν,η,τ -> predicted ν̇ (compare to ν̇ in CSV)
 # ------------------------------------------------------------
-PLOT_ACCEL_CHECK = False
-
-# which parameter sets to include in accel overlay (only used if PLOT_ACCEL_CHECK=True)
-PLOT_ACCEL_SIM         = True    # includes SIM_MLE / SIM_TRUTH (depending on which are enabled above)
+PLOT_ACCEL_CHECK       = False
+PLOT_ACCEL_SIM         = False
 PLOT_ACCEL_MLE         = False
 PLOT_ACCEL_TEST_1      = False
 PLOT_ACCEL_TEST_2      = False
@@ -103,29 +110,23 @@ PLOT_ACCEL_MAP         = False
 PLOT_ACCEL_HMC_TEST_1  = False
 
 # ------------------------------------------------------------
-# 0h) Optional tau residual diagnostics
+# 0h) Optional tau residual diagnostics (inverse dynamics)
 # Uses measured (nu, nu_dot, eta) and computes:
 # tau_hat = M*nu_dot + C*nu + D*nu + g
 # then compares commanded tau (CSV) vs tau_hat
 # ------------------------------------------------------------
-PLOT_TAU_RESIDUAL_DIAGNOSTICS = True
-
-# which parameter set(s) to run tau residual plot for
+PLOT_TAU_RESIDUAL_DIAGNOSTICS = False
 TAU_RESIDUAL_LABELS = []
 if PLOT_SIM_TRUTH:
     TAU_RESIDUAL_LABELS.append("SIM_TRUTH")
-# if PLOT_SIM_MLE:
-#     TAU_RESIDUAL_LABELS.append("SIM_MLE")
-# if PLOT_MLE:
-#     TAU_RESIDUAL_LABELS.append("MLE")
-
-TAU_RESIDUAL_PCT = 95   # percentile threshold for shading
+TAU_RESIDUAL_PCT = 95
 
 # ------------------------------------------------------------
-# 0i) (Optional) quick config printouts
+# 0i) quick config printouts
 # ------------------------------------------------------------
 print(f"[config] ACTIVE_DOF={ACTIVE_DOF}")
 print(f"[config] INCLUDE_CA={INCLUDE_CA}, INCLUDE_G={INCLUDE_G}")
+print(f"[config] SEGMENTED_INTEGRATION={SEGMENTED_INTEGRATION}, USE_VALIDITY_FLAGS={USE_VALIDITY_FLAGS}")
 print(f"[config] HMC_BASELINE={HMC_BASELINE}, ENABLE_HMC_BAND={ENABLE_HMC_BAND}")
 print(f"[config] HMC_BAND_PARAM_SUBSET={HMC_BAND_PARAM_SUBSET}")
 print(f"[config] TAU_RESIDUAL_LABELS={TAU_RESIDUAL_LABELS}, TAU_RESIDUAL_PCT={TAU_RESIDUAL_PCT}")
@@ -164,96 +165,142 @@ ACCEL_META = {
 # === 1) Load CSV ============================================
 # ============================================================
 data = np.genfromtxt(csv_path, delimiter="\t", skip_header=1)
-
+if data.ndim != 2 or data.shape[1] < 25:
+    raise RuntimeError(f"CSV seems malformed or too few columns: shape={data.shape}")
 
 t = data[:, 0].astype(float)
 t_rel = t - t[0]
 
-# Measured body velocities ν = [u v w p q r]
-u_meas = data[:, 7].astype(float)
-v_meas = data[:, 8].astype(float)
-w_meas = data[:, 9].astype(float)
-p_meas = data[:, 10].astype(float)
-q_meas = data[:, 11].astype(float)
-r_meas = data[:, 12].astype(float)
-nu_meas = np.vstack((u_meas, v_meas, w_meas, p_meas, q_meas, r_meas)).T  # (N,6)
+# ν_dot (1..6)
+nu_dot_meas = np.vstack([data[:, i].astype(float) for i in range(1, 7)]).T
 
-# Applied forces/moments τ = [X Y Z K M N]
-tau_X = data[:, 19].astype(float)
-tau_Y = data[:, 20].astype(float)
-tau_Z = data[:, 21].astype(float)
-tau_K = data[:, 22].astype(float)
-tau_M = data[:, 23].astype(float)
-tau_N = data[:, 24].astype(float)
-tau = np.vstack((tau_X, tau_Y, tau_Z, tau_K, tau_M, tau_N)).T  # (N,6)
+# ν (7..12)
+nu_meas = np.vstack([data[:, i].astype(float) for i in range(7, 13)]).T
 
-# Body accelerations ν_dot = [u_dot v_dot w_dot p_dot q_dot r_dot]
-u_dot_meas = data[:, 1].astype(float)
-v_dot_meas = data[:, 2].astype(float)
-w_dot_meas = data[:, 3].astype(float)
-p_dot_meas = data[:, 4].astype(float)
-q_dot_meas = data[:, 5].astype(float)
-r_dot_meas = data[:, 6].astype(float)
-nu_dot_meas = np.vstack((u_dot_meas, v_dot_meas, w_dot_meas, p_dot_meas, q_dot_meas, r_dot_meas)).T  # (N,6)
+# η (13..18)
+eta_meas = np.vstack([data[:, i].astype(float) for i in range(13, 19)]).T
 
-# Position / attitude η = [x y z phi theta psi]
-x_meas     = data[:, 13].astype(float)
-y_meas     = data[:, 14].astype(float)
-z_meas     = data[:, 15].astype(float)
-phi_meas   = data[:, 16].astype(float)
-theta_meas = data[:, 17].astype(float)
-psi_meas   = data[:, 18].astype(float)
-eta_meas = np.vstack((x_meas, y_meas, z_meas, phi_meas, theta_meas, psi_meas)).T  # (N,6)
+# τ (19..24)
+tau = np.vstack([data[:, i].astype(float) for i in range(19, 25)]).T
 
-assert np.all(np.isfinite(nu_meas[0, :])), "nu_meas[0] contains NaN/Inf"
-assert np.all(np.isfinite(eta_meas[0, :])), "eta_meas[0] contains NaN/Inf"
-assert np.all(np.isfinite(tau[0, :])), "tau[0] contains NaN/Inf"
+if USE_TAU_SCALE:
+    print(f"[INFO] Scaling tau by factor {TAU_SCALE}")
+    tau = TAU_SCALE * tau
 
+# Optional validity columns (25..30) if present
+pose_valid = pose_age = twist_valid = twist_age = wrench_valid = wrench_age = None
+if data.shape[1] >= 31:
+    pose_valid   = data[:, 25].astype(float)
+    pose_age     = data[:, 26].astype(float)
+    twist_valid  = data[:, 27].astype(float)
+    twist_age    = data[:, 28].astype(float)
+    wrench_valid = data[:, 29].astype(float)
+    wrench_age   = data[:, 30].astype(float)
 
-bad_nu  = np.where(~np.isfinite(nu_meas).all(axis=1))[0]
-bad_eta = np.where(~np.isfinite(eta_meas).all(axis=1))[0]
-bad_tau = np.where(~np.isfinite(tau).all(axis=1))[0]
+def pct_valid(x):
+    if x is None:
+        return None
+    return 100.0 * float(np.mean(x > 0.5))
 
-assert bad_nu.size  == 0,  f"nu_meas has NaN/Inf at rows: {bad_nu[:10]}"
-assert bad_eta.size == 0, f"eta_meas has NaN/Inf at rows: {bad_eta[:10]}"
-assert bad_tau.size == 0, f"tau has NaN/Inf at rows: {bad_tau[:10]}"
+print("\n=== CSV columns ===")
+print(f"shape = {data.shape}")
+if data.shape[1] >= 31:
+    print(f"pose_valid  : {pct_valid(pose_valid):.2f}% valid")
+    print(f"twist_valid : {pct_valid(twist_valid):.2f}% valid")
+    print(f"wrench_valid: {pct_valid(wrench_valid):.2f}% valid")
+else:
+    print("No pose/twist/wrench validity columns detected (need 31 cols).")
+print("===================\n")
 
+# ============================================================
+# === 1b) Segments (NaN/dropout aware) =======================
+# ============================================================
+def contiguous_segments(mask: np.ndarray, min_len: int = 10):
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return []
+    breaks = np.where(np.diff(idx) > 1)[0]
+    starts = np.r_[0, breaks + 1]
+    ends   = np.r_[breaks, idx.size - 1]
+    segs_out = []
+    for s, e in zip(starts, ends):
+        a = int(idx[s])
+        b = int(idx[e] + 1)
+        if (b - a) >= min_len:
+            segs_out.append((a, b))
+    return segs_out
+
+def build_valid_mask(
+    nu_meas: np.ndarray,
+    eta_meas: np.ndarray,
+    tau: np.ndarray,
+    pose_valid=None, pose_age=None,
+    twist_valid=None, twist_age=None,
+    wrench_valid=None, wrench_age=None,
+    use_flags: bool = True,
+    require_pose: bool = False,
+    require_twist: bool = True,
+    require_wrench: bool = True,
+    max_age_s=None,
+):
+    m = (
+        np.isfinite(nu_meas).all(axis=1) &
+        np.isfinite(eta_meas).all(axis=1) &
+        np.isfinite(tau).all(axis=1)
+    )
+
+    if use_flags and (pose_valid is not None) and (twist_valid is not None) and (wrench_valid is not None):
+        if require_pose:
+            m &= (pose_valid > 0.5)
+        if require_twist:
+            m &= (twist_valid > 0.5)
+        if require_wrench:
+            m &= (wrench_valid > 0.5)
+
+        if max_age_s is not None:
+            if require_pose and (pose_age is not None):
+                m &= (pose_age <= max_age_s)
+            if require_twist and (twist_age is not None):
+                m &= (twist_age <= max_age_s)
+            if require_wrench and (wrench_age is not None):
+                m &= (wrench_age <= max_age_s)
+
+    return m
+
+valid_mask = build_valid_mask(
+    nu_meas=nu_meas,
+    eta_meas=eta_meas,
+    tau=tau,
+    pose_valid=pose_valid, pose_age=pose_age,
+    twist_valid=twist_valid, twist_age=twist_age,
+    wrench_valid=wrench_valid, wrench_age=wrench_age,
+    use_flags=USE_VALIDITY_FLAGS,
+    require_pose=REQUIRE_POSE_VALID,
+    require_twist=REQUIRE_TWIST_VALID,
+    require_wrench=REQUIRE_WRENCH_VALID,
+    max_age_s=MAX_ALLOWED_AGE_S,
+)
+
+segs = contiguous_segments(valid_mask, min_len=MIN_SEG_LEN) if SEGMENTED_INTEGRATION else [(0, len(t))]
+
+total_valid = int(np.sum(valid_mask))
+print(f"[INFO] valid_mask True samples: {total_valid} / {len(valid_mask)} ({100*total_valid/len(valid_mask):.2f}%)")
+print(f"[INFO] Found {len(segs)} segment(s) (min_len={MIN_SEG_LEN})")
+if len(segs) == 0:
+    raise RuntimeError("No valid segments found. Relax validity gating or check CSV.")
 
 # ============================================================
 # === 2) Parameters ==========================================
 # ============================================================
 G = 9.8
+params_base = {"W": 23.89 * G}
 
-params_base = {
-    "W": 23.89 * G,   # kept for compatibility; g_eta recomputes W from m
-}
-
-# -------------------------
-# BASE: MLE parameters (HYBRID: AHRS accel + MOCAP state CSV)
-# -------------------------
 params_mle = {
     **params_base,
-
-    # Physical
-    "m": 23.89,
-    "B": 236.00,
-    "I_xx": 0.5,
-    "I_yy": 1.76,
-    "I_zz": 2.13,
-
-    # CG / CB (m)
+    "m": 23.89, "B": 236.00, "I_xx": 0.5, "I_yy": 1.76, "I_zz": 2.13,
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.03,
-
-    # Added mass
-    "X_dot_u": -33.61,
-    "Y_dot_v": -31.56,
-    "Z_dot_w": -79.58,
-    "K_dot_p": -0.1,
-    "M_dot_q": -0.46,
-    "N_dot_r": -0.70,
-
-    # Linear & quadratic damping
+    "X_dot_u": -33.61, "Y_dot_v": -31.56, "Z_dot_w": -79.58, "K_dot_p": -0.1, "M_dot_q": -0.46, "N_dot_r": -0.70,
     "X_u": -16.49, "X_uu": -42.49,
     "Y_v": -34.05, "Y_vv": -108.74,
     "Z_w": -35.66, "Z_ww": -128.31,
@@ -262,142 +309,54 @@ params_mle = {
     "N_r": -2.88, "N_rr": -2.69,
 }
 
-# -------------------------
-# SIM TRUTH PARAM SET (HoloOcean / simulator "true" coefficients)
-# Intended use: τ residual diagnostics plot (inverse dynamics consistency)
-# -------------------------
 params_sim_truth = {
     **params_base,
-
-    # Physical
-    "m": 17.2,
-    "B": 17.2 * G,   # neutrally buoyant (B=W)
-    "I_xx": 1.0,
-    "I_yy": 1.0,
-    "I_zz": 1.0,
-
-    # CG / CB (m)
+    "m": 17.2, "B": 17.2 * G, "I_xx": 1.0, "I_yy": 1.0, "I_zz": 1.0,
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.05,
-
-    # Added mass (truth)
-    "X_dot_u": -18.0,
-    "Y_dot_v": -22.584,
-    "Z_dot_w": -22.3775,
-    "K_dot_p": -0.079,
-    "M_dot_q": -0.26,
-    "N_dot_r": -0.286,
-
-    # Linear & quadratic damping (truth)
-    "X_u": -4.66,   "X_uu": -51.5,
-    "Y_v": -8.25,   "Y_vv": -102.006,
-    "Z_w": -14.17,  "Z_ww": -155.8358,
-    "K_p": -1.5,    "K_pp": -2.1,
-    "M_q": -2.9,    "M_qq": -14.6,
+    "X_dot_u": -18.0, "Y_dot_v": -22.584, "Z_dot_w": -22.3775, "K_dot_p": -0.079, "M_dot_q": -0.26, "N_dot_r": -0.286,
+    "X_u": -4.66, "X_uu": -51.5,
+    "Y_v": -8.25, "Y_vv": -102.006,
+    "Z_w": -14.17, "Z_ww": -155.8358,
+    "K_p": -1.5, "K_pp": -2.1,
+    "M_q": -2.9, "M_qq": -14.6,
     "N_r": -10.343, "N_rr": -8.8,
 }
 
-
-# -------------------------
-# SIM PARAM SET LEARNED FROM MLE (simulation data; buoyancy = weight)
-# -------------------------
 params_sim_mle = {
     **params_base,
-
-    # Physical
-    "m": 17.2,
-    # buoyancy equals weight -> B = m*g
-    "B": 168.56,
-
-    "I_xx": 1.0,
-    "I_yy": 1.0,
-    "I_zz": 1.0,
-
-    # CG / CB (m)
+    "m": 17.2, "B": 168.56, "I_xx": 1.0, "I_yy": 1.0, "I_zz": 1.0,
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.05,
-
-    # Added mass
-    # NOTE: your sim node names these X_udot, Y_vdot, ... but this script uses X_dot_u, Y_dot_v, ...
-    "X_dot_u": -17.44,
-    "Y_dot_v": -22.12,
-    "Z_dot_w": -21.60,
-    "K_dot_p": -0.07,
-    "M_dot_q": -0.24,
-    "N_dot_r": -0.26,
-
-    # Linear & quadratic damping
-    "X_u": -4.72,   "X_uu": -51.4,
-    "Y_v": -8.31,   "Y_vv": -101.88,
-    "Z_w": -14.23,  "Z_ww": -155.57,
-    "K_p": -1.44,    "K_pp": -2.08,
-    "M_q": -2.9,    "M_qq": -14.36,
+    "X_dot_u": -17.44, "Y_dot_v": -22.12, "Z_dot_w": -21.60, "K_dot_p": -0.07, "M_dot_q": -0.24, "N_dot_r": -0.26,
+    "X_u": -4.72, "X_uu": -51.4,
+    "Y_v": -8.31, "Y_vv": -101.88,
+    "Z_w": -14.23, "Z_ww": -155.57,
+    "K_p": -1.44, "K_pp": -2.08,
+    "M_q": -2.9, "M_qq": -14.36,
     "N_r": -10.37, "N_rr": -8.75,
 }
 
-
-# -------------------------
-# TEST PARAM SET #1
-# -------------------------
 params_test_1 = {
     **params_base,
-
-    # Physical
-    "m": 23.8,
-    "B": 239.80,
-    "I_xx": 1.0,
-    "I_yy": 1.0,
-    "I_zz": 1.442503809928894,
-
-    # CG / CB (m)
+    "m": 23.8, "B": 239.80, "I_xx": 1.0, "I_yy": 1.0, "I_zz": 1.442503809928894,
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.02,
-
-    # Added mass
-    "X_dot_u": -18.754636764526367,
-    "Y_dot_v":  -19.286680221557617,
-    "Z_dot_w": -54.19,
-    "K_dot_p": -0.079,
-    "M_dot_q": -0.26,
-    "N_dot_r": -1.4425019025802612,
-
-    # Linear & quadratic damping
-    "X_u":  -15.252839088439941,
-    "X_uu": -43.881591796875,
+    "X_dot_u": -18.754636764526367, "Y_dot_v": -19.286680221557617, "Z_dot_w": -54.19, "K_dot_p": -0.079, "M_dot_q": -0.26, "N_dot_r": -1.4425019025802612,
+    "X_u": -15.252839088439941, "X_uu": -43.881591796875,
     "Y_v": -38.239105224609375, "Y_vv": -117.48196411132812,
-    "Z_w": -33.47,  "Z_ww": -136.92,
-    "K_p":  -1.5,   "K_pp":  -2.1,
-    "M_q":  -2.9,   "M_qq": -14.6,
-    "N_r": -2.8859241008758545,
-    "N_rr": -2.6936986446380615,
+    "Z_w": -33.47, "Z_ww": -136.92,
+    "K_p": -1.5, "K_pp": -2.1,
+    "M_q": -2.9, "M_qq": -14.6,
+    "N_r": -2.8859241008758545, "N_rr": -2.6936986446380615,
 }
 
-# -------------------------
-# TEST PARAM SET #2
-# -------------------------
 params_test_2 = {
     **params_base,
-
-    # Physical
-    "m": 23.89,
-    "B": 235.89,
-    "I_xx": 0.5,
-    "I_yy": 1.76,
-    "I_zz": 2.13,
-
-    # CG / CB (m)
+    "m": 23.89, "B": 235.89, "I_xx": 0.5, "I_yy": 1.76, "I_zz": 2.13,
     "x_cg": 0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.03,
-
-    # Added mass
-    "X_dot_u": -33.61,
-    "Y_dot_v": -11.48,
-    "Z_dot_w": -56.142,
-    "K_dot_p": -0.1,
-    "M_dot_q": -0.46,
-    "N_dot_r": -0.70,
-
-    # Linear & quadratic damping
+    "X_dot_u": -33.61, "Y_dot_v": -11.48, "Z_dot_w": -56.142, "K_dot_p": -0.1, "M_dot_q": -0.46, "N_dot_r": -0.70,
     "X_u": -16.49, "X_uu": -42.49,
     "Y_v": -27.27, "Y_vv": -107.24,
     "Z_w": -33.38, "Z_ww": -137.14,
@@ -406,95 +365,41 @@ params_test_2 = {
     "N_r": -2.88, "N_rr": -2.69,
 }
 
-# -------------------------
-# BASE: MAP parameters
-# -------------------------
 params_map = {
     **params_base,
-
-    "m": 23.89,
-    "B": 235.97,
-    "I_xx": 0.41,
-    "I_yy": 1.31,
-    "I_zz": 1.46,
-
+    "m": 23.89, "B": 235.97, "I_xx": 0.41, "I_yy": 1.31, "I_zz": 1.46,
     "x_cg": -0.0, "y_cg": 0.0, "z_cg": 0.0,
     "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.03,
-
-    "X_dot_u": -32.41,
-    "Y_dot_v": -16.78,
-    "Z_dot_w": -77.77,
-    "K_dot_p": -0.22,
-    "M_dot_q": -0.91,
-    "N_dot_r": -1.32,
-
-    "X_u":  -1.01,    "X_uu": -62.05,
-    "Y_v":  -0.93,   "Y_vv": -137.19,
-    "Z_w":  -35.30,  "Z_ww": -126.63,
-    "K_p":  -1.14,    "K_pp": -0.2,
-    "M_q":  -1.05,    "M_qq": -2.91,
-    "N_r": -0.99,    "N_rr": -3.51,
+    "X_dot_u": -32.41, "Y_dot_v": -16.78, "Z_dot_w": -77.77, "K_dot_p": -0.22, "M_dot_q": -0.91, "N_dot_r": -1.32,
+    "X_u": -1.01, "X_uu": -62.05,
+    "Y_v": -0.93, "Y_vv": -137.19,
+    "Z_w": -35.30, "Z_ww": -126.63,
+    "K_p": -1.14, "K_pp": -0.2,
+    "M_q": -1.05, "M_qq": -2.91,
+    "N_r": -0.99, "N_rr": -3.51,
 }
 
-# -----------------------------
-# OPTIONAL: HMC point-estimate params (was: params_hmc_map)
-# Rename only; values unchanged
-# -----------------------------
-params_hmc_test_1 = {
-    **params_base,
+params_hmc_test_1 = dict(params_map)
 
-    "m": 23.89,
-    "B": 239.53,
-    "I_xx": 0.41,
-    "I_yy": 1.31,
-    "I_zz": 1.46,
-
-    "x_cg": -0.0, "y_cg": 0.0, "z_cg": 0.0,
-    "x_cb": 0.0, "y_cb": 0.0, "z_cb": -0.03,
-
-    "X_dot_u": -32.41,
-    "Y_dot_v": -16.78,
-    "Z_dot_w": -53.61,
-    "K_dot_p": -0.22,
-    "M_dot_q": -0.91,
-    "N_dot_r": -1.32,
-
-    "X_u":  -1.01,    "X_uu": -62.05,
-    "Y_v":  -0.93,   "Y_vv": -137.19,
-    "Z_w":  -35.93,  "Z_ww": -128.68,
-    "K_p":  -1.14,    "K_pp": -0.2,
-    "M_q":  -1.05,    "M_qq": -2.91,
-    "N_r": -0.99,    "N_rr": -3.51,
-}
-
-# ============================================================
-# === Parameter registry =====================================
-# ============================================================
 PARAM_SETS = {
     "MLE": params_mle,
     "TEST_1": params_test_1,
     "TEST_2": params_test_2,
-
     "SIM_TRUTH": params_sim_truth,
     "SIM_MLE": params_sim_mle,
-
     "MAP": params_map,
     "HMC_TEST_1": params_hmc_test_1,
 }
-
-
 
 # ============================================================
 # === 2b) Optional: load HMC samples for predictive band ======
 # ============================================================
 theta_plot = None
 param_names = None
-
 if ENABLE_HMC_BAND:
     hmc_data = torch.load(HMC_SAMPLES_PATH, map_location="cpu")
     theta_samples = hmc_data["samples"].detach().cpu().numpy()
     param_names = list(hmc_data["param_names"])
-
     if theta_samples.shape[0] > HMC_BAND_NPLOT:
         sel = np.random.choice(theta_samples.shape[0], size=HMC_BAND_NPLOT, replace=False)
         theta_plot = theta_samples[sel]
@@ -631,35 +536,29 @@ def C_A(nu: np.ndarray, params: dict) -> np.ndarray:
     a1 = Xdu * u
     a2 = Ydv * v
     a3 = Zdw * w
-
     b1 = Kdp * p
     b2 = Mdq * q
     b3 = Ndr * r
 
     C = np.zeros((6, 6), dtype=float)
-
     C[0, 4] = -a3
     C[0, 5] =  a2
     C[1, 3] =  a3
     C[1, 5] = -a1
     C[2, 3] = -a2
     C[2, 4] =  a1
-
     C[3, 1] = -a3
     C[3, 2] =  a2
     C[3, 4] = -b3
     C[3, 5] =  b2
-
     C[4, 0] =  a3
     C[4, 2] = -a1
     C[4, 3] =  b3
     C[4, 5] = -b1
-
     C[5, 0] = -a2
     C[5, 1] =  a1
     C[5, 3] = -b2
     C[5, 4] =  b1
-
     return C
 
 def C_total(nu: np.ndarray, params: dict, include_ca: bool) -> np.ndarray:
@@ -670,25 +569,14 @@ def C_total(nu: np.ndarray, params: dict, include_ca: bool) -> np.ndarray:
 
 def D_nu(nu: np.ndarray, params: dict) -> np.ndarray:
     u, v, w, p, q, r = [float(x) for x in nu]
-
     lin = np.array([
-        float(params["X_u"]),
-        float(params["Y_v"]),
-        float(params["Z_w"]),
-        float(params["K_p"]),
-        float(params["M_q"]),
-        float(params["N_r"]),
+        float(params["X_u"]), float(params["Y_v"]), float(params["Z_w"]),
+        float(params["K_p"]), float(params["M_q"]), float(params["N_r"]),
     ], dtype=float)
-
     quad = np.array([
-        float(params["X_uu"]),
-        float(params["Y_vv"]),
-        float(params["Z_ww"]),
-        float(params["K_pp"]),
-        float(params["M_qq"]),
-        float(params["N_rr"]),
+        float(params["X_uu"]), float(params["Y_vv"]), float(params["Z_ww"]),
+        float(params["K_pp"]), float(params["M_qq"]), float(params["N_rr"]),
     ], dtype=float)
-
     abs_nu = np.array([abs(u), abs(v), abs(w), abs(p), abs(q), abs(r)], dtype=float)
     diag_entries = lin + quad * abs_nu
     return -np.diag(diag_entries)
@@ -702,13 +590,8 @@ def g_eta(eta: np.ndarray, params: dict) -> np.ndarray:
     W = m * g0
     B = float(params["B"])
 
-    x_G = float(params["x_cg"])
-    y_G = float(params["y_cg"])
-    z_G = float(params["z_cg"])
-
-    x_B = float(params["x_cb"])
-    y_B = float(params["y_cb"])
-    z_B = float(params["z_cb"])
+    x_G = float(params["x_cg"]); y_G = float(params["y_cg"]); z_G = float(params["z_cg"])
+    x_B = float(params["x_cb"]); y_B = float(params["y_cb"]); z_B = float(params["z_cb"])
 
     WB    = W - B
     xW_xB = x_G * W - x_B * B
@@ -727,16 +610,16 @@ def g_eta(eta: np.ndarray, params: dict) -> np.ndarray:
         -xW_xB * cth * sphi - yW_yB * sth
     ], dtype=float)
 
-def forward_integrate_6dof(
-    t: np.ndarray,
+def forward_integrate_6dof_segment(
+    t_seg: np.ndarray,
     nu0: np.ndarray,
     eta0: np.ndarray,
-    tau: np.ndarray,
+    tau_seg: np.ndarray,
     params: dict,
     include_ca: bool = False,
     include_g: bool = False,
 ):
-    N = len(t)
+    N = len(t_seg)
     nu_pred = np.zeros((N, 6), dtype=float)
     eta_pred = np.zeros((N, 6), dtype=float)
     nu_dot_pred = np.zeros((N, 6), dtype=float)
@@ -747,7 +630,7 @@ def forward_integrate_6dof(
     M = M_total(params)
 
     for k in range(1, N):
-        dt = DT_FIXED if FORCE_FIXED_DT else float(t[k] - t[k - 1])
+        dt = DT_FIXED if FORCE_FIXED_DT else float(t_seg[k] - t_seg[k - 1])
 
         if not np.isfinite(dt) or dt <= 0.0:
             nu_pred[k, :] = nu_pred[k - 1, :]
@@ -762,19 +645,7 @@ def forward_integrate_6dof(
         D = D_nu(nu_k, params)
         gvec = g_eta(eta_k, params) if include_g else np.zeros(6, dtype=float)
 
-        # # debug triggers
-        # if k % 500 == 0:
-        #     print(f"k={k}, max|nu|={np.max(np.abs(nu_k)):.3e}, dt={dt:.3e}")
-        #
-        # if np.max(np.abs(nu_k)) > 1e3:  # threshold; yaw will be way smaller normally
-        #     print("BLOWUP AT k=", k, "dt=", dt)
-        #     print("nu_k:", nu_k)
-        #     print("tau:", tau[k - 1, :])
-        #     M = M_total(params)
-        #     print("Mdiag:", np.diag(M))
-        #     break
-
-        rhs = tau[k - 1, :] - (C @ nu_k) - (D @ nu_k) - gvec
+        rhs = tau_seg[k - 1, :] - (C @ nu_k) - (D @ nu_k) - gvec
         nu_dot = np.linalg.solve(M, rhs)
 
         nu_kp1 = nu_k + nu_dot * dt
@@ -787,61 +658,32 @@ def forward_integrate_6dof(
 
     return nu_pred, eta_pred, nu_dot_pred
 
-def predict_nu_dot_from_csv_states(
+def segmented_forward_prediction(
+    t: np.ndarray,
     nu_meas: np.ndarray,
     eta_meas: np.ndarray,
     tau: np.ndarray,
     params: dict,
-    include_ca: bool = False,
-    include_g: bool = False,
-) -> np.ndarray:
-    N = nu_meas.shape[0]
-    nu_dot_hat = np.zeros((N, 6), dtype=float)
-    M = M_total(params)
+    segs: list,
+    include_ca: bool,
+    include_g: bool,
+):
+    N = len(t)
+    nu_pred_all = np.full((N, 6), np.nan, dtype=float)
 
-    for k in range(N):
-        nu_k = nu_meas[k, :]
-        eta_k = eta_meas[k, :]
+    for (a, b) in segs:
+        nu_pred_seg, _, _ = forward_integrate_6dof_segment(
+            t_seg=t[a:b],
+            nu0=nu_meas[a, :],
+            eta0=eta_meas[a, :],
+            tau_seg=tau[a:b, :],
+            params=params,
+            include_ca=include_ca,
+            include_g=include_g,
+        )
+        nu_pred_all[a:b, :] = nu_pred_seg
 
-        C = C_total(nu_k, params, include_ca=include_ca)
-        D = D_nu(nu_k, params)
-        gvec = g_eta(eta_k, params) if include_g else np.zeros(6, dtype=float)
-
-        rhs = tau[k, :] - (C @ nu_k) - (D @ nu_k) - gvec
-        nu_dot_hat[k, :] = np.linalg.solve(M, rhs)
-
-    return nu_dot_hat
-
-
-def predict_tau_from_csv_states(
-    nu_meas: np.ndarray,
-    nu_dot_meas: np.ndarray,
-    eta_meas: np.ndarray,
-    params: dict,
-    include_ca: bool = False,
-    include_g: bool = False,
-) -> np.ndarray:
-    """
-    Computes tau_model = M*nu_dot + C(nu)*nu + D(nu)*nu + g(eta)
-    using measured nu, nu_dot, eta from the CSV.
-    """
-    N = nu_meas.shape[0]
-    tau_hat = np.zeros((N, 6), dtype=float)
-    M = M_total(params)
-
-    for k in range(N):
-        nu_k = nu_meas[k, :]
-        nud_k = nu_dot_meas[k, :]
-        eta_k = eta_meas[k, :]
-
-        C = C_total(nu_k, params, include_ca=include_ca)
-        D = D_nu(nu_k, params)
-        gvec = g_eta(eta_k, params) if include_g else np.zeros(6, dtype=float)
-
-        tau_hat[k, :] = (M @ nud_k) + (C @ nu_k) + (D @ nu_k) + gvec
-
-    return tau_hat
-
+    return nu_pred_all
 
 def residual_stats(residual: np.ndarray):
     r = residual[np.isfinite(residual)]
@@ -851,80 +693,169 @@ def residual_stats(residual: np.ndarray):
     rmse = float(np.sqrt(np.mean(r**2)))
     return mu, rmse
 
+def fmt_mu_rmse(mu, rmse, unit="", nd=4):
+    if (mu is None) or (rmse is None) or (not np.isfinite(mu)) or (not np.isfinite(rmse)):
+        return "mean=nan, rmse=nan"
+    if unit:
+        return f"mean={mu:+.{nd}f} {unit}, rmse={rmse:.{nd}f} {unit}"
+    return f"mean={mu:+.{nd}f}, rmse={rmse:.{nd}f}"
+
+
+def error_metrics(y_meas: np.ndarray, y_pred: np.ndarray):
+    """
+    Returns RMSE (units), NRMSE_sigma (dimensionless), and %RMSE (percent),
+    computed on samples where both y_meas and y_pred are finite.
+    """
+    m = np.isfinite(y_meas) & np.isfinite(y_pred)
+    if np.sum(m) < 5:
+        return dict(rmse=np.nan, nrmse_sigma=np.nan, prmse=np.nan)
+
+    e = y_meas[m] - y_pred[m]
+
+    rmse = float(np.sqrt(np.mean(e**2)))
+
+    sig = float(np.std(y_meas[m], ddof=0))
+    nrmse_sigma = rmse / sig if sig > 1e-12 else np.nan
+
+    rms_y = float(np.sqrt(np.mean(y_meas[m]**2)))
+    prmse = 100.0 * (rmse / rms_y) if rms_y > 1e-12 else np.nan
+
+    return dict(rmse=rmse, nrmse_sigma=nrmse_sigma, prmse=prmse)
+
+def error_metrics_masked(y_meas: np.ndarray, y_pred: np.ndarray, mask: np.ndarray):
+    """
+    Same metrics, but only on samples where mask is True AND both signals are finite.
+    """
+    m = mask & np.isfinite(y_meas) & np.isfinite(y_pred)
+    if np.sum(m) < 5:
+        return dict(n=np.sum(m), rmse=np.nan, nrmse_sigma=np.nan, prmse=np.nan)
+
+    e = y_meas[m] - y_pred[m]
+    rmse = float(np.sqrt(np.mean(e**2)))
+
+    sig = float(np.std(y_meas[m], ddof=0))
+    nrmse_sigma = rmse / sig if sig > 1e-12 else np.nan
+
+    rms_y = float(np.sqrt(np.mean(y_meas[m]**2)))
+    prmse = 100.0 * (rmse / rms_y) if rms_y > 1e-12 else np.nan
+
+    return dict(n=int(np.sum(m)), rmse=rmse, nrmse_sigma=nrmse_sigma, prmse=prmse)
+
+
+def predict_nu_dot_from_csv_states_masked(
+    nu_meas: np.ndarray,
+    eta_meas: np.ndarray,
+    tau: np.ndarray,
+    params: dict,
+    include_ca: bool = False,
+    include_g: bool = False,
+    mask: np.ndarray = None,
+) -> np.ndarray:
+    N = nu_meas.shape[0]
+    nu_dot_hat = np.full((N, 6), np.nan, dtype=float)
+    M = M_total(params)
+
+    if mask is None:
+        mask = np.ones(N, dtype=bool)
+
+    idxs = np.where(mask)[0]
+    for k in idxs:
+        nu_k = nu_meas[k, :]
+        eta_k = eta_meas[k, :]
+        C = C_total(nu_k, params, include_ca=include_ca)
+        D = D_nu(nu_k, params)
+        gvec = g_eta(eta_k, params) if include_g else np.zeros(6, dtype=float)
+        rhs = tau[k, :] - (C @ nu_k) - (D @ nu_k) - gvec
+        nu_dot_hat[k, :] = np.linalg.solve(M, rhs)
+
+    return nu_dot_hat
+
+def predict_tau_from_csv_states_masked(
+    nu_meas: np.ndarray,
+    nu_dot_meas: np.ndarray,
+    eta_meas: np.ndarray,
+    params: dict,
+    include_ca: bool = False,
+    include_g: bool = False,
+    mask: np.ndarray = None,
+) -> np.ndarray:
+    N = nu_meas.shape[0]
+    tau_hat = np.full((N, 6), np.nan, dtype=float)
+    M = M_total(params)
+
+    if mask is None:
+        mask = np.ones(N, dtype=bool)
+
+    idxs = np.where(mask)[0]
+    for k in idxs:
+        nu_k = nu_meas[k, :]
+        nud_k = nu_dot_meas[k, :]
+        eta_k = eta_meas[k, :]
+        C = C_total(nu_k, params, include_ca=include_ca)
+        D = D_nu(nu_k, params)
+        gvec = g_eta(eta_k, params) if include_g else np.zeros(6, dtype=float)
+        tau_hat[k, :] = (M @ nud_k) + (C @ nu_k) + (D @ nu_k) + gvec
+
+    return tau_hat
+
 # ============================================================
-# === 4) Run predictions (only for enabled methods) ===========
+# === 4) Run predictions =====================================
 # ============================================================
 enabled_labels = []
-
-# base MLE
-if PLOT_MLE:
-    enabled_labels.append("MLE")
-
-if PLOT_SIM_MLE:
-    enabled_labels.append("SIM_MLE")
-
-if PLOT_SIM_TRUTH:
-    enabled_labels.append("SIM_TRUTH")
-
-# test overlays
-if PLOT_TEST_PARAMS_1:
-    enabled_labels.append("TEST_1")
-if PLOT_TEST_PARAMS_2:
-    enabled_labels.append("TEST_2")
-
-# base MAP
-if PLOT_MAP:
-    enabled_labels.append("MAP")
-
-# optional HMC point-estimate overlay
-if PLOT_HMC_TEST_PARAMS_1:
-    enabled_labels.append("HMC_TEST_1")
+if PLOT_MLE: enabled_labels.append("MLE")
+if PLOT_SIM_MLE: enabled_labels.append("SIM_MLE")
+if PLOT_SIM_TRUTH: enabled_labels.append("SIM_TRUTH")
+if PLOT_TEST_PARAMS_1: enabled_labels.append("TEST_1")
+if PLOT_TEST_PARAMS_2: enabled_labels.append("TEST_2")
+if PLOT_MAP: enabled_labels.append("MAP")
+if PLOT_HMC_TEST_PARAMS_1: enabled_labels.append("HMC_TEST_1")
 
 if len(enabled_labels) == 0:
-    raise ValueError("No prediction methods enabled. Enable at least one of: PLOT_MLE, PLOT_TEST_PARAMS_1, PLOT_TEST_PARAMS_2, PLOT_MAP, PLOT_HMC_TEST_PARAMS_1.")
+    raise ValueError("No prediction methods enabled.")
 
 pred = {}
 residuals = {}
 stats = {}
+metrics = {}
+
+
+i_dof = DOF_INDEX[ACTIVE_DOF]
 
 for label in enabled_labels:
     p = PARAM_SETS[label]
-    nu_pred, eta_pred, nu_dot_pred = forward_integrate_6dof(
+    nu_pred_all = segmented_forward_prediction(
         t=t,
-        nu0=nu_meas[0, :],
-        eta0=eta_meas[0, :],
+        nu_meas=nu_meas,
+        eta_meas=eta_meas,
         tau=tau,
         params=p,
+        segs=segs,
         include_ca=INCLUDE_CA,
         include_g=INCLUDE_G,
     )
-
-    i = DOF_INDEX[ACTIVE_DOF]
-    pred[label] = nu_pred[:, i]
-    residuals[label] = nu_meas[:, i] - pred[label]
+    pred[label] = nu_pred_all[:, i_dof]
+    residuals[label] = np.where(np.isfinite(pred[label]), nu_meas[:, i_dof] - pred[label], np.nan)
     stats[label] = residual_stats(residuals[label])
+    metrics[label] = error_metrics(nu_meas[:, i_dof], pred[label])
+
+
 
 # ============================================================
-# === 4b) Robust HMC posterior predictive band (filtered) =====
+# === 4b) HMC posterior predictive band (segmented + filtered) =
 # ============================================================
 u_p05 = u_p50 = u_p95 = None
-
 if ENABLE_HMC_BAND and (theta_plot is not None) and (param_names is not None):
-    i_dof = DOF_INDEX[ACTIVE_DOF]
+    param_idx = {name: i for i, name in enumerate(param_names)}
     Ns = theta_plot.shape[0]
     Tn = len(t)
-
-    param_idx = {name: i for i, name in enumerate(param_names)}
 
     U_list = []
     bad = 0
     bad_reasons = {"linAlg": 0, "nan": 0, "umax": 0, "nonfinite": 0}
 
-    # thresholds to detect divergence (tune if needed)
-    U_ABS_MAX = 10.0      # surge shouldn't exceed a few m/s in tank
-    NAN_FRAC_MAX = 0.01   # allow tiny amount of NaNs, but basically none
+    U_ABS_MAX = 10.0
+    NAN_FRAC_MAX = 0.01
 
-    # ---- choose baseline that matches your HMC run ----
     if HMC_BASELINE == "MAP":
         base_params = params_map
     elif HMC_BASELINE == "SIM_TRUTH":
@@ -935,68 +866,55 @@ if ENABLE_HMC_BAND and (theta_plot is not None) and (param_names is not None):
         raise ValueError(f"Unknown HMC_BASELINE='{HMC_BASELINE}'")
 
     print(f"[HMC band] Using baseline: {HMC_BASELINE}")
-
-    # print a couple mismatches early (helps catch wrong baseline)
-    if bad == 0:
-        print(f"[HMC band] baseline = {HMC_BASELINE}, U_ABS_MAX={U_ABS_MAX}, NAN_FRAC_MAX={NAN_FRAC_MAX}")
+    print(f"[HMC band] U_ABS_MAX={U_ABS_MAX}, NAN_FRAC_MAX={NAN_FRAC_MAX}")
 
     for j in range(Ns):
-        # start from chosen baseline
         p = dict(base_params)
-
-
-        # overwrite only allowed keys (everything else stays baseline)
         for name in HMC_BAND_PARAM_SUBSET:
-            if name in param_idx and name in p:
+            if (name in param_idx) and (name in p):
                 p[name] = float(theta_plot[j, param_idx[name]])
 
-        # integrate safely
         try:
-            nu_pred, _, _ = forward_integrate_6dof(
+            nu_pred_all = segmented_forward_prediction(
                 t=t,
-                nu0=nu_meas[0, :],
-                eta0=eta_meas[0, :],
+                nu_meas=nu_meas,
+                eta_meas=eta_meas,
                 tau=tau,
                 params=p,
+                segs=segs,
                 include_ca=INCLUDE_CA,
                 include_g=INCLUDE_G,
             )
         except np.linalg.LinAlgError:
             bad += 1
             bad_reasons["linAlg"] += 1
-            if bad <= 5:
-                print(f"[HMC band reject] sample {j}: LinAlgError (solve failed)")
             continue
 
-        u = nu_pred[:, i_dof].astype(float)
+        u = nu_pred_all[:, i_dof].astype(float)
 
-        # diagnostics
+        # Evaluate only on predicted samples (finite)
+        finite_u = u[np.isfinite(u)]
+        if finite_u.size == 0:
+            bad += 1
+            bad_reasons["nonfinite"] += 1
+            continue
+
         nan_frac = float(np.mean(~np.isfinite(u)))
-        umax = float(np.nanmax(np.abs(u))) if np.any(np.isfinite(u)) else np.inf
+        umax = float(np.nanmax(np.abs(finite_u)))
 
-        # rejection logic with reasons
         reject = False
-        reason = []
-
         if nan_frac > NAN_FRAC_MAX:
             reject = True
             bad_reasons["nan"] += 1
-            reason.append(f"nan_frac={nan_frac:.3f}")
-
         if not np.isfinite(umax):
             reject = True
             bad_reasons["nonfinite"] += 1
-            reason.append("umax=nonfinite")
-
         if umax > U_ABS_MAX:
             reject = True
             bad_reasons["umax"] += 1
-            reason.append(f"umax={umax:.2f} > {U_ABS_MAX}")
 
         if reject:
             bad += 1
-            if bad <= 5:
-                print(f"[HMC band reject] sample {j}: " + ", ".join(reason))
             continue
 
         U_list.append(u)
@@ -1006,7 +924,6 @@ if ENABLE_HMC_BAND and (theta_plot is not None) and (param_names is not None):
         print("[HMC band] reject breakdown:", bad_reasons)
     else:
         U = np.vstack(U_list)  # (Nkeep, Tn)
-
         u_p05 = np.nanpercentile(U, 5, axis=0)
         u_p50 = np.nanpercentile(U, 50, axis=0)
         u_p95 = np.nanpercentile(U, 95, axis=0)
@@ -1020,7 +937,7 @@ if ENABLE_HMC_BAND and (theta_plot is not None) and (param_names is not None):
               "max", float(np.nanmax(w)))
 
 # ============================================================
-# === 4c) Accel consistency check (no integration) ============
+# === 4c) Accel consistency check (masked, no integration) =====
 # ============================================================
 accel_pred = {}
 accel_residuals = {}
@@ -1028,70 +945,72 @@ accel_stats = {}
 
 if PLOT_ACCEL_CHECK:
     accel_enabled = []
-
-    if PLOT_ACCEL_MLE and PLOT_MLE:
-        accel_enabled.append("MLE")
-
-    if PLOT_ACCEL_TEST_1 and PLOT_TEST_PARAMS_1:
-        accel_enabled.append("TEST_1")
-
-    if PLOT_ACCEL_TEST_2 and PLOT_TEST_PARAMS_2:
-        accel_enabled.append("TEST_2")
-
-    if PLOT_ACCEL_MAP and PLOT_MAP:
-        accel_enabled.append("MAP")
-
-    if PLOT_ACCEL_HMC_TEST_1 and PLOT_HMC_TEST_PARAMS_1:
-        accel_enabled.append("HMC_TEST_1")
-
+    if PLOT_ACCEL_MLE and PLOT_MLE: accel_enabled.append("MLE")
+    if PLOT_ACCEL_TEST_1 and PLOT_TEST_PARAMS_1: accel_enabled.append("TEST_1")
+    if PLOT_ACCEL_TEST_2 and PLOT_TEST_PARAMS_2: accel_enabled.append("TEST_2")
+    if PLOT_ACCEL_MAP and PLOT_MAP: accel_enabled.append("MAP")
+    if PLOT_ACCEL_HMC_TEST_1 and PLOT_HMC_TEST_PARAMS_1: accel_enabled.append("HMC_TEST_1")
 
     if PLOT_ACCEL_SIM:
-        if PLOT_SIM_MLE:
-            accel_enabled.append("SIM_MLE")
-        if PLOT_SIM_TRUTH:
-            accel_enabled.append("SIM_TRUTH")
+        if PLOT_SIM_MLE: accel_enabled.append("SIM_MLE")
+        if PLOT_SIM_TRUTH: accel_enabled.append("SIM_TRUTH")
+
+    # mask: must be valid for state + have nu_dot
+    accel_mask = valid_mask & np.isfinite(nu_dot_meas).all(axis=1)
 
     for label in accel_enabled:
         p = PARAM_SETS[label]
-        nu_dot_hat = predict_nu_dot_from_csv_states(
+        nu_dot_hat = predict_nu_dot_from_csv_states_masked(
             nu_meas=nu_meas,
             eta_meas=eta_meas,
             tau=tau,
             params=p,
             include_ca=INCLUDE_CA,
             include_g=INCLUDE_G,
+            mask=accel_mask
         )
-
-        i = DOF_INDEX[ACTIVE_DOF]
-        accel_pred[label] = nu_dot_hat[:, i]
-        accel_residuals[label] = nu_dot_meas[:, i] - accel_pred[label]
+        accel_pred[label] = nu_dot_hat[:, i_dof]
+        accel_residuals[label] = np.where(np.isfinite(accel_pred[label]), nu_dot_meas[:, i_dof] - accel_pred[label], np.nan)
         accel_stats[label] = residual_stats(accel_residuals[label])
-
 
 # ============================================================
 # === 5) Plot: tau, velocity, residual =======================
 # ============================================================
 meta = DOF_META[ACTIVE_DOF]
-i_dof = DOF_INDEX[ACTIVE_DOF]
-
 nu_meas_dof = nu_meas[:, i_dof]
 tau_dof = tau[:, i_dof]
 
-# ---- thesis-friendly style knobs ----
+
 TITLE_FS  = 20
 AXIS_FS   = 18
 TICK_FS   = 14
 LEGEND_FS = 13
 
 TAU_LW    = 2.6
-MEAS_LW   = 2.8
-PRED_LW   = 2.2
+MEAS_LW   = 3.6
+PRED_LW   = 1.9
 RESID_LW  = 2.0
 MEAN_LW   = 1.6
 
+# --- consistent colors per method ---
+METHOD_COLORS = {
+    "MLE": "#ff7f0e",       # orange
+    "MAP": "#2ca02c",       # green
+    "SIM_TRUTH": "#d62728", # red
+    "SIM_MLE": "#9467bd",   # purple
+    "TEST_1": "#8c564b",    # brown
+    "TEST_2": "#e377c2",    # pink
+    "HMC_TEST_1": "#7f7f7f" # gray
+}
+
+def color_for(label: str):
+    # fallback if you add new labels later
+    return METHOD_COLORS.get(label, None)
+
+
 plt.figure(figsize=(14, 10))
 
-# 1) Applied tau component
+# 1) tau
 ax1 = plt.subplot(3, 1, 1)
 ax1.plot(t_rel, tau_dof, linewidth=TAU_LW, label=f"{meta['tau']} applied")
 ax1.set_ylabel(f"{meta['tau']} [{meta['tau_unit']}]", fontsize=AXIS_FS, fontweight="bold")
@@ -1099,29 +1018,24 @@ ax1.grid(True, alpha=0.35)
 ax1.tick_params(axis="both", labelsize=TICK_FS)
 ax1.legend(fontsize=LEGEND_FS, framealpha=0.95)
 
-# 2) measured vs predicted
+# 2) velocity
 ax2 = plt.subplot(3, 1, 2, sharex=ax1)
 
-# 2) measured vs predicted
-ax2 = plt.subplot(3, 1, 2, sharex=ax1)
-
-# Bold measured (blue backbone)
+# measured backbone (bold blue)
 ax2.plot(
-    t_rel,
-    nu_meas_dof,
-    linewidth=3.6,
-    color="#1f77b4",   # blue
+    t_rel, nu_meas_dof,
+    linewidth=MEAS_LW,
+    color="#1f77b4",
     label=f"{meta['sym']} measured",
     zorder=4
 )
 
-# Thin-but-visible predicted (orange on top)
+# predicted overlays (orange on top)
 for label in enabled_labels:
     ax2.plot(
-        t_rel,
-        pred[label],
-        linewidth=1.9,      # slightly bolder than before
-        color="#ff7f0e",    # matplotlib orange
+        t_rel, pred[label],
+        linewidth=PRED_LW,
+        color=color_for(label),
         alpha=0.95,
         label=f"{meta['sym']} predicted ({label})",
         zorder=6
@@ -1130,20 +1044,23 @@ for label in enabled_labels:
 
 
 
-# === HMC predictive band + median ONLY ===
+# HMC band
 if ENABLE_HMC_BAND and (u_p05 is not None):
     ax2.fill_between(
         t_rel, u_p05, u_p95,
-        alpha=0.30,
+        color="#c9a300",
+        alpha=0.40,
         zorder=1,
-        label="HMC 90% band",
+        label="HMC 90% band"
     )
+
     ax2.plot(
         t_rel, u_p50,
         linestyle="--",
         linewidth=2.6,
-        zorder=6,
-        label="HMC median",
+        color="red",
+        zorder=7,
+        label="HMC median"
     )
 
 ax2.set_ylabel(f"{meta['sym']} [{meta['unit']}]", fontsize=AXIS_FS, fontweight="bold")
@@ -1161,15 +1078,29 @@ ax2.legend(
     borderpad=0.3
 )
 
-
-
-
 # 3) residuals
 ax3 = plt.subplot(3, 1, 3, sharex=ax1)
 for label in enabled_labels:
     mu, rmse = stats[label]
-    ax3.plot(t_rel, residuals[label], linewidth=RESID_LW, label=f"Residual ({label})")
-    if label == enabled_labels[0]:
+    m = metrics[label]
+
+    stat_txt = (
+        f"mean={mu:+.4f} {meta['unit']}, "
+        f"rmse={m['rmse']:.4f} {meta['unit']}, "
+        f"nrmseσ={m['nrmse_sigma']:.3f}, "
+        f"%rmse={m['prmse']:.1f}%"
+    )
+
+
+    ax3.plot(
+        t_rel,
+        residuals[label],
+        linewidth=RESID_LW,
+        color=color_for(label),
+        label=f"Residual ({label})  [{stat_txt}]"
+    )
+
+    if label == enabled_labels[0] and np.isfinite(mu):
         ax3.axhline(
             mu,
             linestyle="--",
@@ -1178,48 +1109,43 @@ for label in enabled_labels:
             label="Mean residual"
         )
 
+
 ax3.set_ylabel("Residual", fontsize=AXIS_FS, fontweight="bold")
 ax3.set_xlabel("Time [s]", fontsize=AXIS_FS, fontweight="bold")
 ax3.grid(True, alpha=0.35)
 ax3.tick_params(axis="both", labelsize=TICK_FS)
 ax3.legend(fontsize=LEGEND_FS, framealpha=0.95)
 
-# ---- single clean title for the whole figure ----
 plt.suptitle(f"{meta['name']} ({ACTIVE_DOF}) Post-Check", fontsize=TITLE_FS, fontweight="bold", y=0.98)
-
 plt.tight_layout(rect=[0, 0, 1, 0.965])
 plt.show()
-
 
 # ============================================================
 # === 5c) Plot accel consistency check (optional) =============
 # ============================================================
 if PLOT_ACCEL_CHECK and len(accel_pred) > 0:
     toggle_line = f"Includes C_RB{' + C_A' if INCLUDE_CA else ''}{', includes g(eta)' if INCLUDE_G else ', excludes g(eta)'}"
-
     ameta = ACCEL_META[ACTIVE_DOF]
     nu_dot_meas_dof = nu_dot_meas[:, i_dof]
 
     plt.figure(figsize=(14, 8))
-
-    # 1) accel overlay
     ax1 = plt.subplot(2, 1, 1)
-    ax1.plot(t_rel, nu_dot_meas_dof, linewidth=2, label=f"{ameta['sym']} truth (CSV)")
 
+    ax1.plot(t_rel, nu_dot_meas_dof, linewidth=2, label=f"{ameta['sym']} truth (CSV)")
     for label in accel_pred.keys():
         ax1.plot(t_rel, accel_pred[label], linewidth=2, label=f"{ameta['sym']} predicted ({label})")
 
     ax1.set_ylabel(f"{ameta['sym']} [{ameta['unit']}]")
-    ax1.set_title(f"{ameta['name']} accel consistency check (no integration): CSV ν,η,τ → predicted ν̇\n{toggle_line}")
+    ax1.set_title(f"{ameta['name']} accel consistency check (MASKED): CSV ν,η,τ → predicted ν̇\n{toggle_line}")
     ax1.grid(True)
     ax1.legend()
 
-    # 2) accel residuals
     ax2 = plt.subplot(2, 1, 2, sharex=ax1)
     for label in accel_pred.keys():
         mu, rmse = accel_stats[label]
         ax2.plot(t_rel, accel_residuals[label], label=f"Residual ({label})  mean={mu:+.4e}, rmse={rmse:.4e}")
-        ax2.axhline(mu, linestyle="--", linewidth=1)
+        if np.isfinite(mu):
+            ax2.axhline(mu, linestyle="--", linewidth=1)
 
     ax2.set_ylabel(f"Residual [{ameta['unit']}]")
     ax2.set_xlabel("Time [s]")
@@ -1230,18 +1156,41 @@ if PLOT_ACCEL_CHECK and len(accel_pred) > 0:
     plt.show()
 
 # ============================================================
+# === Amplitude-dependent residual metrics (by |tau| bins) ====
+# ============================================================
+abs_tau = np.abs(tau_dof)
+
+# Define bins (tweak these if you want)
+bins = [
+    ("|τ| ≤ 25", abs_tau <= 25),
+    ("25 < |τ| ≤ 50", (abs_tau > 25) & (abs_tau <= 50)),
+    ("|τ| > 50", abs_tau > 50),
+]
+
+print("\n=== Amplitude-dependent error metrics (by |tau|) ===")
+for label in enabled_labels:
+    print(f"\n[{label}]")
+    for name, msk in bins:
+        mm = error_metrics_masked(nu_meas_dof, pred[label], msk)
+        print(
+            f"  {name:12s}  N={mm['n']:5d}  "
+            f"RMSE={mm['rmse']:.4f} {meta['unit']}  "
+            f"NRMSEσ={mm['nrmse_sigma']:.3f}  "
+            f"%RMSE={mm['prmse']:.1f}%"
+        )
+print("====================================================\n")
+
+
+# ============================================================
 # === 5d) Plot tau residual diagnostics (optional) ============
 # ============================================================
 if PLOT_TAU_RESIDUAL_DIAGNOSTICS:
-
     labels_to_plot = [lab for lab in TAU_RESIDUAL_LABELS if lab in PARAM_SETS]
     if len(labels_to_plot) == 0:
         print("[tau residual diagnostics] No valid labels in TAU_RESIDUAL_LABELS.")
     else:
         meta = DOF_META[ACTIVE_DOF]
-        i_dof = DOF_INDEX[ACTIVE_DOF]
 
-        # ---- style knobs (thesis-friendly) ----
         TITLE_FS = 18
         AXIS_FS  = 16
         TICK_FS  = 13
@@ -1254,100 +1203,70 @@ if PLOT_TAU_RESIDUAL_DIAGNOSTICS:
 
         plt.figure(figsize=(14, 8))
         axL = plt.subplot(1, 1, 1)
-
-        # commanded tau in this DOF (from CSV)
-        tau_cmd = tau[:, i_dof].astype(float)
-
-        # right axis for residual magnitude
         axR = axL.twinx()
 
-        # loop any requested parameter sets (usually SIM_TRUTH only)
+        tau_cmd = tau[:, i_dof].astype(float)
+
+        # mask: only compute inverse dynamics when nu, nu_dot, eta are finite
+        tau_mask = (
+            np.isfinite(nu_meas).all(axis=1) &
+            np.isfinite(nu_dot_meas).all(axis=1) &
+            np.isfinite(eta_meas).all(axis=1) &
+            np.isfinite(tau_cmd)
+        )
+
         for label in labels_to_plot:
             p = PARAM_SETS[label]
 
-            # tau_hat from model LHS using measured states
-            tau_hat = predict_tau_from_csv_states(
+            tau_hat = predict_tau_from_csv_states_masked(
                 nu_meas=nu_meas,
                 nu_dot_meas=nu_dot_meas,
                 eta_meas=eta_meas,
                 params=p,
                 include_ca=INCLUDE_CA,
                 include_g=INCLUDE_G,
+                mask=tau_mask
             )[:, i_dof].astype(float)
 
-            # residual: commanded minus model-implied tau
             r_abs = np.abs(tau_cmd - tau_hat)
+            rr = r_abs[np.isfinite(r_abs)]
+            if rr.size == 0:
+                print(f"[tau residual diagnostics] No finite samples for {label}.")
+                continue
 
-            # percentile threshold
-            thr = np.nanpercentile(r_abs[np.isfinite(r_abs)], TAU_RESIDUAL_PCT)
+            thr = np.nanpercentile(rr, TAU_RESIDUAL_PCT)
 
-            # --- LEFT AXIS: model + commanded (commanded on top) ---
-            axL.plot(
-                t_rel, tau_hat,
-                linewidth=MODEL_LW,
-                label="Model X",
-                zorder=2
-            )
+            axL.plot(t_rel, tau_hat, linewidth=MODEL_LW, label="Model X", zorder=2)
+            axL.plot(t_rel, tau_cmd, linewidth=CMD_LW, label="Commanded X", zorder=5)
 
-            axL.plot(
-                t_rel, tau_cmd,
-                linewidth=CMD_LW,
-                label="Commanded X",
-                zorder=5
-            )
+            axR.plot(t_rel, r_abs, linewidth=RESID_LW, alpha=0.95, label="Residual", zorder=3)
+            axR.axhline(thr, linestyle="--", linewidth=THR_LW, color="red", alpha=0.95, label=f"{TAU_RESIDUAL_PCT}th percentile", zorder=4)
 
-            # --- RIGHT AXIS: residual + threshold ---
-            axR.plot(
-                t_rel, r_abs,
-                linewidth=RESID_LW,
-                alpha=0.95,
-                label="Residual",
-                zorder=3
-            )
-
-            axR.axhline(
-                thr,
-                linestyle="--",
-                linewidth=THR_LW,
-                color="red",
-                alpha=0.95,
-                label="95th percentile",
-                zorder=4
-            )
-
-            # shade regions where |residual| > threshold
             mask = np.isfinite(r_abs) & (r_abs > thr)
             if np.any(mask):
                 idx = np.where(mask)[0]
                 breaks = np.where(np.diff(idx) > 1)[0]
                 starts = np.r_[idx[0], idx[breaks + 1]]
                 ends   = np.r_[idx[breaks], idx[-1]]
-
                 for s, e in zip(starts, ends):
                     axL.axvspan(t_rel[s], t_rel[e], alpha=0.12, zorder=1)
 
-        # ---- Titles / labels (simple + readable) ----
-        axL.set_title("Surge (X) τ Residual Diagnostics", fontsize=TITLE_FS)
+        axL.set_title(f"{meta['name']} ({ACTIVE_DOF}) τ Residual Diagnostics", fontsize=TITLE_FS)
         axL.set_xlabel("Time [s]", fontsize=AXIS_FS)
-        axL.set_ylabel("X [N]", fontsize=AXIS_FS)  # <-- bigger X[N]
+        axL.set_ylabel(f"{meta['tau']} [N]" if meta["tau_unit"] == "N" else f"{meta['tau']} [{meta['tau_unit']}]", fontsize=AXIS_FS)
         axR.set_ylabel("Residual Magnitude", fontsize=AXIS_FS)
 
-        # ticks
         axL.tick_params(axis="both", labelsize=TICK_FS)
         axR.tick_params(axis="y", labelsize=TICK_FS)
-
-        # grids
         axL.grid(True, alpha=0.35)
         axR.grid(False)
 
-        # ---- Legend: only the four items, combined cleanly ----
         h1, l1 = axL.get_legend_handles_labels()
         h2, l2 = axR.get_legend_handles_labels()
 
-        wanted = ["Model X", "Commanded X", "Residual", "95th percentile"]
+        wanted = ["Model X", "Commanded X", "Residual", f"{TAU_RESIDUAL_PCT}th percentile"]
         combined = list(zip(h1 + h2, l1 + l2))
 
-        # keep only wanted, preserve order
         filtered = []
         seen = set()
         for name in wanted:
@@ -1362,10 +1281,56 @@ if PLOT_TAU_RESIDUAL_DIAGNOSTICS:
 
         plt.tight_layout()
         plt.show()
+# ============================================================
+# === Plot Truth (MOCAP) XY Track – First 30 Seconds =========
+# ============================================================
+
+T_WINDOW = 30.0  # seconds
+
+# Time mask
+time_mask = t_rel <= T_WINDOW
+
+x_all = eta_meas[:, 0].astype(float)
+y_all = eta_meas[:, 1].astype(float)
+
+# Build mask
+mask = (
+    np.isfinite(x_all) &
+    np.isfinite(y_all) &
+    time_mask
+)
+
+if pose_valid is not None:
+    mask &= (pose_valid > 0.5)
+
+# Create NaN-separated arrays
+x_plot = np.full_like(x_all, np.nan)
+y_plot = np.full_like(y_all, np.nan)
+x_plot[mask] = x_all[mask]
+y_plot[mask] = y_all[mask]
+
+# Shift to start at origin
+valid_indices = np.where(np.isfinite(x_plot) & np.isfinite(y_plot))[0]
+if len(valid_indices) > 0:
+    i0 = valid_indices[0]
+    x_plot -= x_plot[i0]
+    y_plot -= y_plot[i0]
+
+plt.figure(figsize=(8, 8))
+plt.plot(x_plot, y_plot, linewidth=2.0)
+plt.xlabel("X Position [m]", fontsize=14)
+plt.ylabel("Y Position [m]", fontsize=14)
+plt.title("Defender Teleop Circular Maneuver (First 30 s)", fontsize=16)
+plt.axis("equal")
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+
 
 
 # ============================================================
 # === 6) dt sanity print =====================================
 # ============================================================
 dt_vec = np.diff(t)
-print("dt stats:", np.min(dt_vec), np.mean(dt_vec), np.max(dt_vec))
+print("dt stats:", np.nanmin(dt_vec), np.nanmean(dt_vec), np.nanmax(dt_vec))

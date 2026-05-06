@@ -36,8 +36,8 @@ import torch  # only needed if you later enable HMC band loading
 # ============================================================
 
 # --- Dataset / DOF ---
-ACTIVE_DOF = "Y"   # "X","Y","Z","K","M","N"
-csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/Y_Data/Tank_data/defender_data_y_run_mocap_dropout.csv"
+ACTIVE_DOF = "N"   # "X","Y","Z","K","M","N"
+csv_path = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/csv_files/X_Data/Tank_data/defender_data_mocap_dropout.csv"
 
 # --- Validity gating (recommended ON for segmented integration) ---
 USE_VALIDITY_FLAGS = True
@@ -69,18 +69,18 @@ PLOT_MLE_DROPOUT = False    # NEW MLE params learned with dropout-aware CSV
 
 # --- Optional additional overlays ---
 PLOT_MAP     = True
-PLOT_HMC_MAP = False
+PLOT_HMC_MAP = True
 
 # --- Posterior predictive band (HMC samples) ---
-ENABLE_HMC_BAND = False
-HMC_SAMPLES_PATH = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/hmc_outputs/hmc_yaw_circle_samples.pt"
+ENABLE_HMC_BAND = True
+HMC_SAMPLES_PATH = "/home/andrew/fossen_ml_pipeline/defender_parameter_estimator/hmc_outputs/hmc_surge_dropout_samples.pt"
 HMC_BAND_NPLOT = 400
 
 # --- Optional accel check (no integration) ---
 PLOT_ACCEL_CHECK       = False
-PLOT_ACCEL_MLE_BASE    = True
+PLOT_ACCEL_MLE_BASE    = False
 PLOT_ACCEL_MLE_DROPOUT = False
-PLOT_ACCEL_MAP         = True
+PLOT_ACCEL_MAP         = False
 PLOT_ACCEL_HMC_MAP     = False
 
 
